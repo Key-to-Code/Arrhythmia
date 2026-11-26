@@ -1,0 +1,34 @@
+# Python virtual environments & cache
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# Keil uVision build outputs & user-specific files
+Objects/
+Listings/
+*.uvguix.*
+*.uvoptx
+*.axf
+*.build_log.htm
+*.dep
+*.lnp
+*.map
+*.o
+*.d
+*.crf
+*.iex
+*.scvd.bak
+
+# IDE & editor files
+.vscode/
+.idea/
+
+# OS & miscellaneous
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.log
