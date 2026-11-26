@@ -1,0 +1,16 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Dataset (large binary files, download on demand)
+data/
+
+# Training run outputs (large model files)
+runs/*/ecg_hybrid.keras
+runs/*/trunk_int8.tflite
+
+# Keep these in git (small, needed for deployment):
+# runs/*/rr_model.h
+# runs/*/test_metrics.json
+# runs/*/manifest.json

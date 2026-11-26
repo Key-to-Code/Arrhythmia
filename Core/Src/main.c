@@ -3,10 +3,12 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <math.h>
-
 #include "ecg_cnn.h"
 
+/* fabsf replacement — compiles to a single VABS.F32 on Cortex-M4F, no libm needed */
+#define ECG_FABSF(x) ((x) < 0.0f ? -(x) : (x))
+
+/* M_PI kept for any other users, defined as a constant (no math.h needed) */
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
 #endif
@@ -52,6 +54,41 @@ volatile uint32_t    watch_ventBeats    = 0;
 volatile uint32_t    watch_supraBeats   = 0;
 volatile uint32_t    watch_fifoOverflows = 0;
 volatile bool        watch_leadOff      = false;
+
+/* RR interval state for hybrid CNN+RR inference */
+static uint32_t rr_last_peak_tick = 0;      /* msTicks at previous QRS */
+static uint32_t rr_history[8]     = {0};    /* rolling history of valid gaps (256-Hz samples) */
+static uint8_t  rr_history_count  = 0;
+static uint8_t  rr_history_head   = 0;
+
+static inline uint32_t ms_to_samples(uint32_t ms) { return ms * 256 / 1000; }
+
+static void rr_on_beat(uint32_t now_tick, uint8_t *rr_abs_out, uint8_t *rr_rel_out) {
+    if (rr_last_peak_tick == 0) {
+        *rr_abs_out = 128; *rr_rel_out = 128;
+    } else {
+        uint32_t gap_ms = now_tick - rr_last_peak_tick;
+        uint32_t gap_s  = ms_to_samples(gap_ms);
+        if (gap_s <= 1 || gap_s > 768) {
+            *rr_abs_out = 128; *rr_rel_out = 128;
+            rr_history_count = 0; rr_history_head = 0;
+        } else {
+            *rr_abs_out = (uint8_t)((gap_s > 512 ? 512 : gap_s) * 255 / 512);
+            uint32_t mean = gap_s;
+            if (rr_history_count > 0) {
+                uint32_t sum = 0;
+                for (uint8_t i = 0; i < rr_history_count; i++) sum += rr_history[i];
+                mean = sum / rr_history_count;
+            }
+            uint32_t rel = gap_s * 128 / (mean > 0 ? mean : 1);
+            *rr_rel_out = (uint8_t)(rel > 255 ? 255 : rel);
+            rr_history[rr_history_head] = gap_s;
+            rr_history_head = (rr_history_head + 1) & 7;
+            if (rr_history_count < 8) rr_history_count++;
+        }
+    }
+    rr_last_peak_tick = now_tick;
+}
 
 /* -------------------------------------------------------------------------
  * Small formatting helpers.
@@ -189,7 +226,8 @@ void UART_Init_All(uint32_t sysclk_hz) {
 
 
     USART2->BRR = (pclk1 + (115200U / 2U)) / 115200U;
-    USART2->CR1 = USART_CR1_TE | USART_CR1_UE;   // telemetry TX only
+    USART2->CR1 = USART_CR1_TE | USART_CR1_RE | USART_CR1_RXNEIE | USART_CR1_UE;
+    NVIC_EnableIRQ(USART2_IRQn);
 
 
     USART1->BRR = (pclk2 + (9600U / 2U)) / 9600U;
@@ -691,17 +729,12 @@ void OLED_ShowECGResult(void) {
 
 typedef struct { float b0, b1, b2, a1, a2, z1, z2; } Biquad;
 
-void biquad_design(Biquad *f, int type, float fc, float Q) {
-    float w  = 2.0f * M_PI * fc / FS;
-    float c  = cosf(w);
-    float al = sinf(w) / (2.0f * Q);
-    float a0 = 1.0f + al;
-    float b0 = 0.0f, b1 = 0.0f, b2 = 0.0f;
-    if (type == 0) { b0 = (1.0f - c) * 0.5f; b1 = 1.0f - c; b2 = (1.0f - c) * 0.5f; } /* LP */
-    if (type == 1) { b0 = (1.0f + c) * 0.5f; b1 = -(1.0f + c); b2 = (1.0f + c) * 0.5f; } /* HP */
-    if (type == 2) { b0 = 1.0f; b1 = -2.0f * c; b2 = 1.0f; } /* Notch */
-    f->b0 = b0 / a0; f->b1 = b1 / a0; f->b2 = b2 / a0;
-    f->a1 = (-2.0f * c) / a0; f->a2 = (1.0f - al) / a0;
+/* Pre-computed biquad coefficients — eliminates cosf/sinf and libm entirely.
+ * Values computed by: 2*pi*fc/256 -> cos/sin analytically, then normalised by a0=1+alpha.
+ * To re-verify: python -c "import math; ..." (see ecg_training/train_rr.py firmware_sos()) */
+static void biquad_set(Biquad *f, float b0, float b1, float b2, float a1, float a2) {
+    f->b0 = b0; f->b1 = b1; f->b2 = b2;
+    f->a1 = a1; f->a2 = a2;
     f->z1 = 0.0f; f->z2 = 0.0f;
 }
 
@@ -714,11 +747,16 @@ float biquad_process(Biquad *f, float x) {
 
 Biquad hp05, lp40, nt50, hp8, lp20;
 void filters_init(void) {
-    biquad_design(&hp05, 1, 0.5f,  0.707f);  /* Highpass  0.5 Hz  */
-    biquad_design(&lp40, 0, 40.0f, 0.707f);  /* Lowpass  40 Hz    */
-    biquad_design(&nt50, 2, 50.0f, 10.0f);   /* Notch    50 Hz    */
-    biquad_design(&hp8,  1, 8.0f,  0.707f);  /* QRS band HP  8 Hz */
-    biquad_design(&lp20, 0, 20.0f, 0.707f);  /* QRS band LP 20 Hz */
+    /* HP  0.5 Hz  Q=0.707  fs=256 */
+    biquad_set(&hp05,  0.9913587464f, -1.9827174928f,  0.9913587464f, -1.9826428425f,  0.9827921431f);
+    /* LP 40 Hz    Q=0.707  fs=256 */
+    biquad_set(&lp40,  0.1399314618f,  0.2798629236f,  0.1399314618f, -0.6996989006f,  0.2594247477f);
+    /* Notch 50 Hz Q=10.0   fs=256 */
+    biquad_set(&nt50,  0.9550394153f, -0.6434861772f,  0.9550394153f, -0.6434861772f,  0.9100788306f);
+    /* HP  8 Hz    Q=0.707  fs=256 */
+    biquad_set(&hp8,   0.8703148444f, -1.7406296888f,  0.8703148444f, -1.7237446121f,  0.7575147655f);
+    /* LP 20 Hz    Q=0.707  fs=256 */
+    biquad_set(&lp20,  0.0442780368f,  0.0885560736f,  0.0442780368f, -1.3228374097f,  0.4999495569f);
 }
 
 
@@ -822,9 +860,9 @@ void HC05_SendDiagnosticAlert(float hrVal, const char *clsStr, bool isArr);
 void process_beat_inference(void) {
     // 1. Refine R-peak position on filtered signal (corrects QRS filter group delay) 
     long best_peak = peak_sample_pos;
-    float max_abs_val = fabsf(ring_buf_get_sample_at(best_peak));
+    float max_abs_val = ECG_FABSF(ring_buf_get_sample_at(best_peak));
     for (long i = peak_sample_pos - 20; i <= peak_sample_pos; i++) {
-        float v = fabsf(ring_buf_get_sample_at(i));
+        float v = ECG_FABSF(ring_buf_get_sample_at(i));
         if (v > max_abs_val) {
             max_abs_val = v;
             best_peak = i;
@@ -849,13 +887,15 @@ void process_beat_inference(void) {
 
     for (int i = 0; i < BEAT_WINDOW_SIZE; i++) {
         beat_window[i]     = (beat_window[i] - min_val) / range;
-        quantized_input[i] = ecg_cnn_quantize(beat_window[i]);
+        quantized_input[i] = ecg_cnn_quantize_rr(beat_window[i]);
     }
 
-    // 3. INT8 TinyML inference (generated model in ecg_cnn_weights.h)
+    // 3. Hybrid INT8 CNN + RR inference (generated model in rr_model.h)
     float probs[ECG_NUM_CLASSES];
+    uint8_t rr_abs = 128, rr_rel = 128;
+    rr_on_beat(msTicks, &rr_abs, &rr_rel);
     uint32_t t0 = DWT->CYCCNT;
-    int pred = ecg_cnn_predict(quantized_input, probs, NULL);
+    int pred = ecg_cnn_predict_rr(quantized_input, rr_abs, rr_rel, probs);
     watch_inferenceUs = (DWT->CYCCNT - t0) / (SystemCoreClock / 1000000UL);
 
     // 4. Update watch variables
@@ -946,6 +986,119 @@ void StreamPacket_TinyML(uint32_t    timeMs,
     }
 }
 
+/* USART2 RX ring buffer for MATLAB / PC ECG streaming */
+#define UART2_RX_BUF_SZ 256U
+static volatile char     uart2_rx_buf[UART2_RX_BUF_SZ];
+static volatile uint16_t uart2_rx_head = 0;
+static volatile uint16_t uart2_rx_tail = 0;
+static uint32_t          last_uart_rx_tick = 0;
+static bool              uart_stream_active = false;
+
+void USART2_IRQHandler(void) {
+    if (USART2->SR & USART_SR_RXNE) {
+        char c = (char)(USART2->DR & 0xFFU);
+        uint16_t next = (uint16_t)((uart2_rx_head + 1U) & (UART2_RX_BUF_SZ - 1U));
+        if (next != uart2_rx_tail) {
+            uart2_rx_buf[uart2_rx_head] = c;
+            uart2_rx_head = next;
+        }
+    }
+}
+
+/* Lightweight float parser for "%.6f\n" lines (avoids pulling in ~15 KB strtof) */
+static bool uart2_read_sample(float *out) {
+    static char line[32];
+    static uint8_t pos = 0;
+    while (uart2_rx_tail != uart2_rx_head) {
+        char c = uart2_rx_buf[uart2_rx_tail];
+        uart2_rx_tail = (uint16_t)((uart2_rx_tail + 1U) & (UART2_RX_BUF_SZ - 1U));
+        if (c == '\r') continue;
+        if (c == '\n') {
+            if (pos == 0) continue;
+            line[pos] = '\0';
+            pos = 0;
+            const char *p = line;
+            bool neg = false;
+            if (*p == '-') { neg = true; p++; }
+            else if (*p == '+') { p++; }
+            if (*p < '0' || *p > '9') return false;
+            float val = 0.0f;
+            while (*p >= '0' && *p <= '9') { val = val * 10.0f + (float)(*p - '0'); p++; }
+            if (*p == '.') {
+                p++;
+                float frac = 0.1f;
+                while (*p >= '0' && *p <= '9') {
+                    val += (float)(*p - '0') * frac;
+                    frac *= 0.1f;
+                    p++;
+                }
+            }
+            *out = neg ? -val : val;
+            return true;
+        }
+        if (pos < sizeof(line) - 1U) line[pos++] = c;
+    }
+    return false;
+}
+
+static void process_ecg_sample(float raw, bool from_max30003) {
+    float y = biquad_process(&nt50,
+                biquad_process(&lp40,
+                  biquad_process(&hp05, raw)));
+
+    // QRS detection band (8-20 Hz)
+    float d = biquad_process(&lp20,
+                biquad_process(&hp8, raw));
+
+    // Push to segmentation ring buffer
+    ring_buf_push(y);
+
+    // R-peak detection (Elgendi algorithm)
+    long r_peak_idx = qrs_detect(d);
+    if (r_peak_idx >= 0) {
+        peak_sample_pos        = r_peak_idx;
+        post_samples_remaining = POST_R_SAMPLES;
+    }
+
+    // Collect 125 post-peak samples, then classify
+    if (post_samples_remaining > 0) {
+        post_samples_remaining--;
+        if (post_samples_remaining == 0) {
+            process_beat_inference();
+        }
+    }
+
+    // Update Keil watch window scalars
+    watch_rawMv      = raw;
+    watch_filteredMv = y;
+    watch_qrsBandMv  = d;
+
+    uint32_t timeMs = (watch_sampleCount * 1000UL) / (unsigned long)FS;
+    watch_sampleCount++;
+
+    // Electrode contact check at ~4 Hz (only when reading MAX30003)
+    if (from_max30003 && (watch_sampleCount & 0x3FU) == 0U) {
+        uint32_t status = MAX30003_ReadReg(MAX30003_REG_STATUS);
+        watch_leadOff = (status & MAX30003_STATUS_LOFF) != 0U;
+    } else if (!from_max30003) {
+        watch_leadOff = false;
+    }
+
+    // Telemetry at 128 Hz (every 2nd sample)
+    if ((watch_sampleCount & 0x01U) == 0U) {
+        StreamPacket_TinyML(
+            timeMs, raw, y, hr,
+            ecg_cnn_class_letter((int)watch_predClass),
+            arrhythmia,
+            watch_inferenceUs,
+            watch_leadOff,
+            watch_fifoOverflows
+        );
+    }
+
+    HC05_TxDrain();
+}
+
 int main(void) {
 
 
@@ -1013,69 +1166,30 @@ int main(void) {
     while (1) {
         HC05_TxDrain();
 
-        // Drain the FIFO in bursts: one slow iteration must not leave more
-        // than the 32 samples the FIFO can hold.
-        int32_t adcSample;
+        // 1. Check for incoming MATLAB/PC ECG stream on USART2 (auto-disables MAX30003)
+        float uart_raw = 0.0f;
         uint32_t burst = 0;
-        while (burst < 32U && MAX30003_DataReady() && MAX30003_ReadSample(&adcSample)) {
-            // 18-bit signed ADC counts -> millivolts
-            float raw = (float)adcSample * ECG_SAMPLE_LSB_MV;
-            float y = biquad_process(&nt50,
-                        biquad_process(&lp40,
-                          biquad_process(&hp05, raw)));
-
-            // QRS detection band (8-20 Hz) 
-            float d = biquad_process(&lp20,
-                        biquad_process(&hp8, raw));
-
-            // Push to segmentation ring buffer
-            ring_buf_push(y);
-
-            // R-peak detection (Elgendi algorithm)
-            long r_peak_idx = qrs_detect(d);
-            if (r_peak_idx >= 0) {
-                peak_sample_pos        = r_peak_idx;
-                post_samples_remaining = POST_R_SAMPLES;
-            }
-
-            // Collect 125 post-peak samples, then classify 
-            if (post_samples_remaining > 0) {
-                post_samples_remaining--;
-                if (post_samples_remaining == 0) {
-                    process_beat_inference();  
-                }
-            }
-
-            // Update Keil watch window scalars 
-            watch_rawMv      = raw;
-            watch_filteredMv = y;
-            watch_qrsBandMv  = d;
-
-            uint32_t timeMs = (watch_sampleCount * 1000UL) / (unsigned long)FS;
-            watch_sampleCount++;
-
-            // Electrode contact check at ~4 Hz (cheap STATUS read)
-            if ((watch_sampleCount & 0x3FU) == 0U) {
-                uint32_t status = MAX30003_ReadReg(MAX30003_REG_STATUS);
-                watch_leadOff = (status & MAX30003_STATUS_LOFF) != 0U;
-            }
-
-            // Telemetry at 128 Hz (every 2nd sample): full ECG shape, ~55% of
-            // the 115200-baud link. The old every-8th (32 Hz) stream aliased
-            // the QRS complex and made the dashboard waveform look broken.
-            if ((watch_sampleCount & 0x01U) == 0U) {
-                StreamPacket_TinyML(
-                    timeMs, raw, y, hr,
-                    ecg_cnn_class_letter((int)watch_predClass),
-                    arrhythmia,
-                    watch_inferenceUs,
-                    watch_leadOff,
-                    watch_fifoOverflows
-                );
-            }
-
-            HC05_TxDrain();
+        while (burst < 32U && uart2_read_sample(&uart_raw)) {
+            uart_stream_active = true;
+            last_uart_rx_tick  = msTicks;
+            process_ecg_sample(uart_raw, false);
             burst++;
+        }
+
+        // Fall back to MAX30003 if no UART samples arrived in the last 500 ms
+        if (uart_stream_active && (msTicks - last_uart_rx_tick) > 500U) {
+            uart_stream_active = false;
+        }
+
+        // 2. Otherwise drain the MAX30003 SPI FIFO
+        if (!uart_stream_active) {
+            int32_t adcSample;
+            burst = 0;
+            while (burst < 32U && MAX30003_DataReady() && MAX30003_ReadSample(&adcSample)) {
+                float raw = (float)adcSample * ECG_SAMPLE_LSB_MV;
+                process_ecg_sample(raw, true);
+                burst++;
+            }
         }
         //OLED refresh
         if (oled_update_pending) {

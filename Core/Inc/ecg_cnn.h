@@ -36,7 +36,9 @@ typedef struct {
 } cnn_layer_t;
 
 int8_t ecg_cnn_quantize(float x01);                 /* [0,1] -> int8 model input */
+int8_t ecg_cnn_quantize_rr(float x01);              /* [0,1] -> int8 hybrid trunk input */
 int    ecg_cnn_predict(const int8_t *input, float probs[ECG_NUM_CLASSES], int8_t logits[ECG_NUM_CLASSES]);
+int    ecg_cnn_predict_rr(const int8_t *input, uint8_t rr_abs, uint8_t rr_rel, float probs_out[ECG_NUM_CLASSES]);
 int    ecg_cnn_selftest(void);                      /* 1 = matches TFLite reference */
 float  ecg_cnn_selftest_maxdiff(void);              /* worst |prob - TFLite prob| seen by the last selftest */
 

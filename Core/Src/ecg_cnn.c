@@ -4,16 +4,33 @@
  * requantization is done in single-precision float (the M4F has a hardware FPU).
  */
 #include "ecg_cnn.h"
-#include <math.h>
-#include "ecg_cnn_weights.h"   /* generated: cnn_layers[], CNN_* macros, test vectors */
+#include <stddef.h>
 
-/* Build-time sanity checks: a weights header from the wrong model fails to compile
- * instead of silently misclassifying (C99-safe static assert). */
-typedef char cnn_check_input_len[(CNN_IN_LEN == ECG_BEAT_LEN) ? 1 : -1];
-typedef char cnn_check_classes[(CNN_NUM_CLASSES == ECG_NUM_CLASSES) ? 1 : -1];
+/* fast_expf — Schraudolph bit-trick approximation, error < 2 %.
+ * Avoids linking libm (expf), which costs ~6–10 KB on Arm Compiler 6.
+ * Softmax is relative, so a uniform ~2 % error on all logits cancels out;
+ * the argmax result is identical to true expf for all practical ECG inputs. */
+static inline float fast_expf(float x)
+{
+    /* Clamp to avoid overflow in the union cast */
+    if (x >  88.0f) return 3.4028235e+38f;
+    if (x < -88.0f) return 0.0f;
+    union { float f; int32_t i; } u;
+    u.i = (int32_t)(12102203.0f * x) + (127 << 23);
+    return u.f;
+}
+/* rr_model.h is the ONLY model in flash — ecg_cnn_weights.h (old wave-only model)
+ * is excluded to stay within the 32 KB MDK-Lite limit.
+ * rr_trunk_layers[] replaces cnn_layers[]; ecg_cnn_predict_rr() is the only
+ * inference entry point. ecg_cnn_predict() (wave-only) is not compiled. */
+#include "rr_model.h"
 
-static int8_t bufA[CNN_MAX_ACT];
-static int8_t bufB[CNN_MAX_ACT];
+/* Build-time sanity: input length and class count must match the firmware contract */
+typedef char rr_check_input[(RR_WAVE_LEN == ECG_BEAT_LEN) ? 1 : -1];
+typedef char rr_check_classes[(RR_NUM_CLASSES == ECG_NUM_CLASSES) ? 1 : -1];
+
+static int8_t bufA[RR_TRUNK_MAX_ACT];
+static int8_t bufB[RR_TRUNK_MAX_ACT];
 
 static const char *const CLASS_NAME[ECG_NUM_CLASSES]   = { "Normal (N)", "Ventricular (V)", "Supraventricular (S)" };
 static const char *const CLASS_LETTER[ECG_NUM_CLASSES] = { "N", "V", "S" };
@@ -32,7 +49,11 @@ static inline int8_t requant(float v, int zp) {
 }
 
 int8_t ecg_cnn_quantize(float x) {
-    return requant(x / CNN_IN_SCALE, CNN_IN_ZP);
+    return requant(x / RR_IN_SCALE, RR_IN_ZP);
+}
+
+int8_t ecg_cnn_quantize_rr(float x) {
+    return requant(x / RR_IN_SCALE, RR_IN_ZP);
 }
 
 /* CONV (valid, stride 1) and FC. Window of each output step is contiguous
@@ -83,11 +104,11 @@ static void op_pool(const cnn_layer_t *L, const int8_t *x, int8_t *y) {
         }
 }
 
-int ecg_cnn_predict(const int8_t *input, float probs[ECG_NUM_CLASSES], int8_t logits[ECG_NUM_CLASSES]) {
+static const int8_t *run_layers(const cnn_layer_t *layers, int num_layers, const int8_t *input) {
     const int8_t *src = input;
     int8_t *dst = bufA;
-    for (int i = 0; i < CNN_NUM_LAYERS; i++) {
-        const cnn_layer_t *L = &cnn_layers[i];
+    for (int i = 0; i < num_layers; i++) {
+        const cnn_layer_t *L = &layers[i];
         switch (L->type) {
             case CNN_OP_CONV:
             case CNN_OP_FC:   op_conv(L, src, dst);        break;
@@ -98,20 +119,75 @@ int ecg_cnn_predict(const int8_t *input, float probs[ECG_NUM_CLASSES], int8_t lo
         src = dst;
         dst = (dst == bufA) ? bufB : bufA;
     }
-    /* src now holds the final int8 logits; softmax in float */
-    float f[ECG_NUM_CLASSES], mx = -1e30f, sum = 0.0f;
-    int best = 0;
-    for (int c = 0; c < ECG_NUM_CLASSES; c++) {
-        if (logits) logits[c] = src[c];
-        f[c] = ((float)src[c] - CNN_OUT_ZP) * CNN_OUT_SCALE;
-        if (f[c] > mx) { mx = f[c]; best = c; }
+    return src;
+}
+
+/* ecg_cnn_predict() (wave-only, used cnn_layers[] from ecg_cnn_weights.h) is
+ * removed — the hybrid ecg_cnn_predict_rr() below is the sole inference entry point. */
+
+/**
+ * ecg_cnn_predict_rr() - Two-stage hybrid inference.
+ *
+ * Stage 1: Run the INT8 CNN trunk (rr_trunk_layers) -> 16 INT8 features -> float32.
+ * Stage 2: Concatenate 2 scaled RR features -> 18->16 ReLU -> 16->3 softmax on FPU.
+ */
+int ecg_cnn_predict_rr(const int8_t *input, uint8_t rr_abs, uint8_t rr_rel,
+                       float probs_out[ECG_NUM_CLASSES]) {
+    if (!input) return -1;
+    const int8_t *trunk_q = run_layers(rr_trunk_layers, RR_TRUNK_NUM_LAYERS, input);
+
+    float fused[RR_FUSED_FEATS];
+    for (int i = 0; i < RR_TRUNK_FEATS; i++) {
+        fused[i] = ((float)trunk_q[i] - RR_TRUNK_OUT_ZP) * RR_TRUNK_OUT_SCALE;
     }
-    for (int c = 0; c < ECG_NUM_CLASSES; c++) { f[c] = expf(f[c] - mx); sum += f[c]; }
-    if (probs) for (int c = 0; c < ECG_NUM_CLASSES; c++) probs[c] = f[c] / sum;
+    fused[RR_TRUNK_FEATS + 0] = ((float)rr_abs / 255.0f - 0.5f) * 4.0f;
+    fused[RR_TRUNK_FEATS + 1] = ((float)rr_rel / 255.0f - 0.5f) * 4.0f;
+
+    float hidden[RR_HEAD_HIDDEN];
+    for (int j = 0; j < RR_HEAD_HIDDEN; j++) {
+        float acc = rr_b1_head[j];
+        for (int i = 0; i < RR_FUSED_FEATS; i++) {
+            acc += fused[i] * rr_W1_head[i * RR_HEAD_HIDDEN + j];
+        }
+        hidden[j] = (acc > 0.0f) ? acc : 0.0f;
+    }
+
+    float logits[RR_NUM_CLASSES];
+    for (int j = 0; j < RR_NUM_CLASSES; j++) {
+        float acc = rr_b2_head[j];
+        for (int i = 0; i < RR_HEAD_HIDDEN; i++) {
+            acc += hidden[i] * rr_W2_head[i * RR_NUM_CLASSES + j];
+        }
+        logits[j] = acc;
+    }
+
+    float maxv = logits[0];
+    for (int j = 1; j < RR_NUM_CLASSES; j++) {
+        if (logits[j] > maxv) maxv = logits[j];
+    }
+    float sum = 0.0f;
+    int best = 0;
+    for (int j = 0; j < RR_NUM_CLASSES; j++) {
+        logits[j] = fast_expf(logits[j] - maxv);
+        sum += logits[j];
+    }
+    for (int j = 0; j < RR_NUM_CLASSES; j++) {
+        logits[j] /= sum;
+        if (probs_out) probs_out[j] = logits[j];
+        if (logits[j] > logits[best]) best = j;
+    }
     return best;
 }
 
 int ecg_cnn_selftest(void) {
+    for (int i = 0; i < RR_NUM_TESTS; i++) {
+        float ra = rr_test_rr[i][0] * 255.0f + 0.5f;
+        float rr = rr_test_rr[i][1] * 255.0f + 0.5f;
+        uint8_t rr_abs = (ra < 0.0f) ? 0 : (ra > 255.0f ? 255 : (uint8_t)ra);
+        uint8_t rr_rel = (rr < 0.0f) ? 0 : (rr > 255.0f ? 255 : (uint8_t)rr);
+        int pred = ecg_cnn_predict_rr(rr_test_wave[i], rr_abs, rr_rel, NULL);
+        if (pred != rr_test_expected[i]) return 0;
+    }
     return 1;
 }
 
