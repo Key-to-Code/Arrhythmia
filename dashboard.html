@@ -9,93 +9,114 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Chart.js CDN -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- UI font -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Poppins', ui-sans-serif, system-ui, sans-serif; }
+        select { appearance: none; -webkit-appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none' stroke='%2300a3ad' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1l4 4 4-4'/%3E%3C/svg%3E");
+            background-repeat: no-repeat; background-position: right 10px center; }
+    </style>
 </head>
 
-<body class="bg-slate-900 text-slate-100 font-sans min-h-screen flex flex-col items-center p-4">
+<body
+    class="bg-gradient-to-br from-[#c3dfdf] to-[#a9d0d3] text-[#1f3b44] font-sans min-h-screen flex items-center justify-center p-4 md:p-8">
 
-    <!-- Header / Title -->
-    <header
-        class="w-full max-w-5xl flex flex-col md:flex-row justify-between items-center bg-slate-800 border border-slate-700 rounded-xl p-4 mb-6 shadow-lg">
-        <h1 class="text-2xl font-bold tracking-wide text-cyan-400 mb-2 md:mb-0">CardioGuard STM32F401 Telemetry</h1>
-
-        <!-- Connection Controls -->
-        <div class="flex flex-wrap gap-2 items-center">
-            <select id="baudSelect"
-                class="bg-slate-900 border border-slate-600 text-sm rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-cyan-400">
-                <option value="115200" selected>115200 (STM32 telemetry)</option>
-                <option value="9600">9600 (HC-05 / BT Default)</option>
-            </select>
-            <button id="connectSerialBtn"
-                class="bg-blue-600 hover:bg-blue-500 text-white font-medium px-4 py-2 rounded-lg text-sm transition shadow">
-                Connect MAX30003 Stream
-            </button>
-        </div>
-    </header>
-
-    <!-- Connection Status Banner -->
-    <div id="statusBanner"
-        class="w-full max-w-5xl text-center font-semibold py-2 mb-4 rounded-lg bg-slate-800 border border-slate-700 text-yellow-400 text-sm">
-        Status: Disconnected — click "Connect MAX30003 Stream" to open the STM32 COM port
-    </div>
-
-    <!-- Top Metrics Pills (Exact Match to User Photo) -->
-    <div class="w-full max-w-5xl flex flex-wrap justify-center gap-6 mb-4">
-        <div class="bg-slate-800 border border-slate-600 rounded-xl px-7 py-3 flex items-center gap-2 shadow-lg">
-            <span class="text-slate-300 font-semibold text-lg">Heart Rate:</span>
-            <span id="hrDisplay" class="text-white font-bold text-lg">-- BPM</span>
-        </div>
-        <div class="bg-slate-800 border border-slate-600 rounded-xl px-7 py-3 flex items-center gap-2 shadow-lg">
-            <span class="text-slate-300 font-semibold text-lg">Status:</span>
-            <span id="rhythmDisplay" class="text-emerald-400 font-bold text-lg">WAITING FOR DATA</span>
-        </div>
-        <div class="bg-slate-800 border border-slate-600 rounded-xl px-7 py-3 flex items-center gap-2 shadow-lg">
-            <span class="text-slate-300 font-semibold text-lg">Electrodes:</span>
-            <span id="leadOffDisplay" class="text-slate-400 font-bold text-lg">--</span>
-        </div>
-        <div class="bg-slate-800 border border-slate-600 rounded-xl px-7 py-3 flex items-center gap-2 shadow-lg">
-            <span class="text-slate-300 font-semibold text-lg">Overflows:</span>
-            <span id="overflowDisplay" class="text-white font-bold text-lg">--</span>
-        </div>
-    </div>
-
-    <!-- ECG Graph Container -->
-    <div class="w-full max-w-5xl bg-slate-800 border border-slate-700 rounded-xl p-4 shadow-xl flex-grow flex flex-col">
-        <div class="flex justify-between items-center mb-2 px-2">
-            <span class="text-sm font-semibold text-slate-300">Real-Time ECG Waveform</span>
-            <div class="flex gap-4 text-xs items-center">
-                <span class="flex items-center gap-1"><span class="w-3 h-0.5 bg-slate-400 inline-block"></span> Raw ECG
-                    (mV)</span>
-                <span class="flex items-center gap-1"><span class="w-3 h-0.5 bg-cyan-400 inline-block"></span> Filtered
-                    ECG (mV)</span>
-                <select id="scaleSelect"
-                    class="bg-slate-900 border border-slate-600 text-xs rounded px-2 py-1 text-slate-200 focus:outline-none focus:border-cyan-400">
-                    <option value="2">±2 mV</option>
-                    <option value="4" selected>±4 mV</option>
-                    <option value="6">±6 mV</option>
-                </select>
-            </div>
-        </div>
-        <div class="relative w-full h-80 flex-grow">
-            <canvas id="ecgChart"></canvas>
-        </div>
-    </div>
-
-    <!-- Debug Log Box -->
+    <!-- App shell -->
     <div
-        class="w-full max-w-5xl bg-slate-950 border border-slate-800 rounded-xl p-3 mt-4 text-xs font-mono text-slate-400 h-16 overflow-hidden flex flex-col justify-end">
-        <span class="text-slate-500">Last incoming line:</span>
-        <span id="debugLine" class="text-cyan-300 truncate">None</span>
+        class="w-full max-w-6xl bg-white overflow-hidden flex flex-col md:flex-row">
+
+        <!-- Main content -->
+        <main class="flex-1 p-5 md:p-8 flex flex-col min-w-0">
+
+            <!-- Header / Title -->
+            <header class="w-full flex flex-col md:flex-row justify-between items-start md:items-center gap-3 mb-5">
+                <h1 class="text-2xl font-bold tracking-wide text-[#1f3b44]">CardioGuard <span
+                        class="text-[#00a3ad]">STM32F401</span> Telemetry</h1>
+
+                <!-- Connection Controls -->
+                <div class="flex flex-wrap gap-2 items-center md:ml-auto">
+                    <button id="connectSerialBtn"
+                        class="bg-[#00a3ad] hover:bg-[#008f98] text-white font-medium px-5 py-2.5 text-sm transition">
+                        Connect MAX30003 Stream
+                    </button>
+                </div>
+            </header>
+
+            <!-- Connection Status Banner -->
+            <div id="statusBanner"
+                class="w-full text-center font-semibold py-2.5 mb-5 bg-[#fff4e0] border border-[#f6d9a8] text-[#b9770e] text-sm">
+                Status: Disconnected — click "Connect MAX30003 Stream" to open the STM32 COM port
+            </div>
+
+            <!-- Top Metrics Cards -->
+            <div class="w-full grid grid-cols-1 md:grid-cols-3 gap-4 mb-5">
+                <!-- Heart rate (teal gradient card) -->
+                <div
+                    class="relative overflow-hidden bg-gradient-to-br from-[#5fd4dc] to-[#169aa5] px-6 py-5 flex flex-col gap-1">
+                    <svg class="absolute inset-x-0 bottom-0 w-full h-16 opacity-30" viewBox="0 0 200 40"
+                        preserveAspectRatio="none" fill="none" stroke="#fff" stroke-width="1.5"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M0 22h50l6-14 8 28 7-22 5 8h124" />
+                    </svg>
+                    <span class="relative text-white/90 font-medium text-sm">Heart Rate:</span>
+                    <span id="hrDisplay" class="relative text-white font-bold text-4xl">-- BPM</span>
+                </div>
+                <!-- Rhythm status (peach card) -->
+                <div class="bg-[#ffeedd] px-6 py-5 flex flex-col gap-1 justify-center">
+                    <span class="text-[#8a6a4a] font-medium text-sm">Status:</span>
+                    <span id="rhythmDisplay" class="text-[#0f8f87] font-bold text-lg break-words">WAITING FOR DATA</span>
+                </div>
+                <!-- Electrodes (pink card) -->
+                <div class="bg-[#fde6ec] px-6 py-5 flex flex-col gap-1 justify-center">
+                    <span class="text-[#8f5a6a] font-medium text-sm">Electrodes:</span>
+                    <span id="leadOffDisplay" class="text-[#8a9aa0] font-bold text-lg">--</span>
+                </div>
+            </div>
+
+            <!-- ECG Graph Container -->
+            <div
+                class="w-full bg-[#fdf8f0] border border-[#f1e9da] p-4 flex-grow flex flex-col">
+                <div class="flex flex-wrap gap-2 justify-between items-center mb-2 px-2">
+                    <span class="text-sm font-semibold text-[#1f3b44]">Real-Time ECG Waveform</span>
+                    <div class="flex gap-4 text-xs items-center text-[#5b7780]">
+                        <span class="flex items-center gap-1"><span
+                                class="w-3 h-0.5 bg-[#b7c4c9] inline-block"></span> Raw ECG
+                            (mV)</span>
+                        <span class="flex items-center gap-1"><span class="w-3 h-0.5 bg-[#00a3ad] inline-block"></span>
+                            Filtered
+                            ECG (mV)</span>
+                        <select id="scaleSelect"
+                            class="bg-white border border-[#e3ded2] text-xs pl-3 pr-7 py-1.5 text-[#1f3b44] focus:outline-none focus:border-[#00a3ad]">
+                            <option value="2">±2 mV</option>
+                            <option value="4" selected>±4 mV</option>
+                            <option value="6">±6 mV</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="relative w-full h-80 flex-grow">
+                    <canvas id="ecgChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Debug Log Box -->
+            <div
+                class="w-full bg-[#f3f8f8] border border-[#dcebec] p-3 mt-4 text-xs font-mono text-[#6b8790] h-16 overflow-hidden flex flex-col justify-end">
+                <span class="text-[#93a9af]">Last incoming line:</span>
+                <span id="debugLine" class="text-[#00828b] truncate">None</span>
+            </div>
+        </main>
     </div>
 
     <!-- Dashboard Logic Script -->
     <script>
         const connectSerialBtn = document.getElementById('connectSerialBtn');
-        const baudSelect = document.getElementById('baudSelect');
         const statusBanner = document.getElementById('statusBanner');
         const hrDisplay = document.getElementById('hrDisplay');
         const rhythmDisplay = document.getElementById('rhythmDisplay');
         const leadOffDisplay = document.getElementById('leadOffDisplay');
-        const overflowDisplay = document.getElementById('overflowDisplay');
         const scaleSelect = document.getElementById('scaleSelect');
         const debugLine = document.getElementById('debugLine');
 
@@ -104,12 +125,12 @@
 
         function setStatus(text, kind) {
             const styles = {
-                info: 'bg-slate-800 border-slate-700 text-yellow-400',
-                ok: 'bg-emerald-950 border-emerald-800 text-emerald-400',
-                error: 'bg-red-950 border-red-800 text-red-400'
+                info: 'bg-[#fff4e0] border-[#f6d9a8] text-[#b9770e]',
+                ok: 'bg-[#e3f6f4] border-[#a9e0da] text-[#0f8f87]',
+                error: 'bg-[#fde8ec] border-[#f6b9c6] text-[#c2334d]'
             };
             statusBanner.textContent = 'Status: ' + text;
-            statusBanner.className = 'w-full max-w-5xl text-center font-semibold py-2 mb-4 rounded-lg border text-sm ' + styles[kind];
+            statusBanner.className = 'w-full text-center font-semibold py-2.5 mb-5 border text-sm ' + styles[kind];
         }
 
         // Chart.js Configuration
@@ -125,7 +146,7 @@
                     {
                         label: 'Raw ECG',
                         data: [],
-                        borderColor: '#94a3b8', // Gray / Slate Raw ECG
+                        borderColor: '#b7c4c9', // Soft grey Raw ECG
                         borderWidth: 1.0,
                         pointRadius: 0,
                         tension: 0
@@ -133,7 +154,7 @@
                     {
                         label: 'Filtered ECG',
                         data: [],
-                        borderColor: '#22d3ee', // Bright Cyan Filtered ECG
+                        borderColor: '#00a3ad', // Teal Filtered ECG
                         borderWidth: 1.5,
                         pointRadius: 0,
                         tension: 0
@@ -152,11 +173,11 @@
                         min: -4.0,
                         max: 4.0,
                         grid: {
-                            color: 'rgba(255, 255, 255, 0.12)',
+                            color: 'rgba(0, 163, 173, 0.12)',
                             lineWidth: 1
                         },
                         ticks: {
-                            color: '#94a3b8',
+                            color: '#7d969d',
                             stepSize: 1.0,
                             callback: function (v) { return v.toFixed(1); }
                         }
@@ -188,7 +209,6 @@
 
         // Web Serial connection straight to the STM32 USART2 telemetry stream.
         // The firmware embeds the MAX30003 ECG samples in its "ECG:" packets,
-        // so no Python bridge is involved.
         connectSerialBtn.addEventListener('click', async () => {
             if (!('serial' in navigator)) {
                 setStatus('Web Serial not supported. Open this page in Chrome or Edge (file:// or http://localhost).', 'error');
@@ -201,7 +221,7 @@
 
             try {
                 port = await navigator.serial.requestPort();
-                const baudRate = parseInt(baudSelect.value, 10);
+                const baudRate = 115200;
                 await port.open({ baudRate });
 
                 connectSerialBtn.textContent = 'Disconnect';
@@ -302,14 +322,12 @@
                 // 9-field: ...,infUs,loff,ovf  (electrode contact + FIFO health)
                 if (parts.length >= 9) {
                     const leadOff = parseInt(parts[7], 10);
-                    const overflows = parseInt(parts[8], 10);
                     if (!isNaN(leadOff)) {
                         leadOffDisplay.textContent = leadOff ? 'CHECK' : 'OK';
                         leadOffDisplay.className = leadOff
-                            ? 'text-red-400 font-bold text-lg animate-pulse'
-                            : 'text-emerald-400 font-bold text-lg';
+                            ? 'text-[#e0405a] font-bold text-lg animate-pulse'
+                            : 'text-[#0f9d8f] font-bold text-lg';
                     }
-                    if (!isNaN(overflows)) overflowDisplay.textContent = overflows;
                 }
 
                 // Update UI Metrics
@@ -327,10 +345,10 @@
 
                 if (isArrhythmiaActive(arrhythmiaStatus, isLatchedArrhythmia)) {
                     rhythmDisplay.textContent = window.lastArrhythmiaLabel || displayStatus;
-                    rhythmDisplay.className = "text-lg font-bold text-red-400 animate-pulse";
+                    rhythmDisplay.className = "text-lg font-bold text-[#e0405a] break-words animate-pulse";
                 } else {
                     rhythmDisplay.textContent = displayStatus;
-                    rhythmDisplay.className = "text-lg font-bold text-emerald-400";
+                    rhythmDisplay.className = "text-lg font-bold text-[#0f8f87] break-words";
                 }
 
                 // Update Chart Data (8-second scrolling window)
